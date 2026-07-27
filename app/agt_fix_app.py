@@ -6,6 +6,7 @@ Heavy work runs in-process (this env has rasterio/onnxruntime/geopandas); the
 Review tab launches FiftyOne in its own 3.11 venv as a subprocess and embeds it.
 """
 import glob
+import importlib
 import os
 import shutil
 import subprocess
@@ -24,6 +25,24 @@ from rasterio.enums import Resampling
 from rasterio.transform import array_bounds
 
 import app_pipeline as ap
+
+# Streamlit Cloud's on-push redeploy does not always restart the underlying
+# Python process -- when it only reruns the script, an already-imported module
+# keeps running its OLD in-memory code even after `git pull` updates the file
+# on disk (this bit us: app_pipeline.py picked up a fix immediately, but
+# buildseg_pipeline_tile.py -- imported deeper in the chain -- kept running
+# the stale version until a manual "Reboot app"). Force a reload of this app's
+# own modules on every script run, leaves first so each module's own `import X
+# as Y` re-binds to the freshly reloaded version, so a push always takes
+# effect without relying on a manual reboot.
+for _mod_name in ("regularize_lib", "topology_tools", "confidence_score",
+                  "buildseg_pipeline_tile", "fix_agt_polygons", "app_pipeline"):
+    _mod = sys.modules.get(_mod_name)
+    if _mod is not None:
+        try:
+            importlib.reload(_mod)
+        except Exception:
+            pass
 
 # Mirror Streamlit Cloud secrets (App settings -> Secrets) into real environment
 # variables, so the framework-agnostic buildseg_pipeline_tile.find_model() can
