@@ -7,8 +7,11 @@ Review tab launches FiftyOne in its own 3.11 venv as a subprocess and embeds it.
 """
 import glob
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import zipfile
 
 import geopandas as gpd
 import matplotlib
@@ -52,6 +55,77 @@ S.setdefault("gpkg", None)
 S.setdefault("fo_proc", None)
 
 
+def upload_dir():
+    """One scratch folder per browser session, reused across reruns."""
+    S.setdefault("_upload_dir", None)
+    if not S["_upload_dir"]:
+        S["_upload_dir"] = tempfile.mkdtemp(prefix="agtfix_")
+    return S["_upload_dir"]
+
+
+def save_upload(file, subdir=""):
+    """Write an uploaded file to disk (rasterio/geopandas both need a real
+    path, not an in-memory buffer -- shapefiles especially, since the .shp
+    driver opens its .shx/.dbf siblings by path)."""
+    d = os.path.join(upload_dir(), subdir)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, file.name)
+    with open(path, "wb") as f:
+        f.write(file.getbuffer())
+    return path
+
+
+def resolve_uploaded_polygons(ups):
+    """Persist uploaded polygon file(s) and return one path geopandas can
+    open: a .gpkg/.geojson directly, the contents of a zipped Shapefile, or a
+    bare .shp whose .shx/.dbf sidecars were uploaded alongside it.
+
+    The scratch folder is wiped at the start of every call: a Shapefile set is
+    only ever known-consistent as of the current upload, and re-scanning a
+    folder that also held an earlier, unrelated upload from the same browser
+    session risks silently resolving to a stale leftover file instead.
+    """
+    d = os.path.join(upload_dir(), "polygons")
+    if os.path.isdir(d):
+        shutil.rmtree(d)
+    os.makedirs(d, exist_ok=True)
+
+    saved = []
+    for u in ups:
+        if u.name.lower().endswith(".zip"):
+            zpath = os.path.join(d, u.name)
+            with open(zpath, "wb") as f:
+                f.write(u.getbuffer())
+            with zipfile.ZipFile(zpath) as zf:
+                zf.extractall(d)
+                saved += [os.path.join(d, n) for n in zf.namelist() if not n.endswith("/")]
+            os.remove(zpath)
+        else:
+            path = os.path.join(d, u.name)
+            with open(path, "wb") as f:
+                f.write(u.getbuffer())
+            saved.append(path)
+
+    gpkg_or_json = next((p for p in saved
+                        if p.lower().endswith((".gpkg", ".geojson", ".json"))), None)
+    if gpkg_or_json:
+        return gpkg_or_json
+    shp = next((p for p in saved if p.lower().endswith(".shp")), None)
+    if shp:
+        base = os.path.splitext(shp)[0]
+        missing = [ext for ext in (".shx", ".dbf") if not os.path.exists(base + ext)]
+        if missing:
+            st.warning("A Shapefile needs its sidecar files too -- missing "
+                      f"{', '.join(missing)}. Select the .shp together with its "
+                      ".shx/.dbf/.prj, or upload a single .zip of the whole set.")
+            return ""
+        return shp
+    if saved:
+        st.warning("Upload a .gpkg/.geojson, a zipped Shapefile (.zip), or the "
+                  "full Shapefile file set (.shp + .shx + .dbf).")
+    return ""
+
+
 def thumb(raster_path, max_px=1000):
     with rasterio.open(raster_path) as r:
         scale = max(1, int(max(r.width, r.height) / max_px))
@@ -89,25 +163,39 @@ tabs = st.tabs(["1 · WV3 data", "2 · Polygons", "3 · Configure & run",
 # ---------------------------------------------------------------- Tab 1: raster
 with tabs[0]:
     st.subheader("Step 1 — WorldView-3 imagery")
-    st.write("Point to the WV3 raster **file** (GeoTIFF / JP2), or a folder to pick "
-             "from. Rasters are large, so the app reads from disk rather than uploading.")
-    st.text_input("Raster path (file or folder)", key="raster_path_input",
-                  placeholder=r"...\Clipped_Training\Luanda_Informal_1.tif")
-    typed = clean_path(S.get("raster_path_input", ""))
+    mode = st.radio("Where is the imagery?",
+                    ["Type a path on this machine", "Upload from your device"],
+                    key="raster_source_mode", horizontal=True)
     S["raster"] = ""
-    if typed and os.path.isdir(typed):
-        rasters = find_rasters(typed)
-        if rasters:
-            st.info(f"That's a folder — pick a raster file ({len(rasters)} found):")
-            choice = st.selectbox("Raster file", rasters,
-                                  format_func=os.path.basename)
-            S["raster"] = choice
-        else:
-            st.warning("No raster files (.tif/.tiff/.jp2/.img/.vrt) found in that folder.")
-    elif typed and os.path.isfile(typed):
-        S["raster"] = typed
-    elif typed:
-        st.warning("Path not found.")
+
+    if mode == "Type a path on this machine":
+        st.write("Point to the WV3 raster **file** (GeoTIFF / JP2), or a folder to pick "
+                 "from. Rasters are large, so the app reads from disk rather than uploading.")
+        st.text_input("Raster path (file or folder)", key="raster_path_input",
+                      placeholder=r"...\Clipped_Training\Luanda_Informal_1.tif")
+        typed = clean_path(S.get("raster_path_input", ""))
+        if typed and os.path.isdir(typed):
+            rasters = find_rasters(typed)
+            if rasters:
+                st.info(f"That's a folder — pick a raster file ({len(rasters)} found):")
+                choice = st.selectbox("Raster file", rasters,
+                                      format_func=os.path.basename)
+                S["raster"] = choice
+            else:
+                st.warning("No raster files (.tif/.tiff/.jp2/.img/.vrt) found in that folder.")
+        elif typed and os.path.isfile(typed):
+            S["raster"] = typed
+        elif typed:
+            st.warning("Path not found.")
+    else:
+        st.write("Upload a WV3 raster (GeoTIFF / JP2). Uploads are capped by this "
+                 "deployment's upload-size limit and held in a temporary folder for "
+                 "this session only — for very large rasters, run the app locally and "
+                 "use a path instead.")
+        up = st.file_uploader("Raster file", type=["tif", "tiff", "jp2", "img"],
+                              key="raster_upload")
+        if up is not None:
+            S["raster"] = save_upload(up, "raster")
 
     if S["raster"]:
         try:
@@ -136,11 +224,28 @@ with tabs[0]:
 # -------------------------------------------------------------- Tab 2: polygons
 with tabs[1]:
     st.subheader("Step 2 — Polygons to fix")
-    st.write("Point to the polygon layer (GeoPackage / Shapefile). Only features "
-             "inside the raster footprint are loaded.")
-    S["polygons"] = clean_path(st.text_input(
-        "Polygon path", value=S["polygons"],
-        placeholder=r"...\Luanda_Polygons\agt_luanda_full.gpkg"))
+    mode2 = st.radio("Where are the polygons?",
+                     ["Type a path on this machine", "Upload from your device"],
+                     key="poly_source_mode", horizontal=True)
+    S["polygons"] = ""
+
+    if mode2 == "Type a path on this machine":
+        st.write("Point to the polygon layer (GeoPackage / Shapefile). Only features "
+                 "inside the raster footprint are loaded.")
+        S["polygons"] = clean_path(st.text_input(
+            "Polygon path", key="poly_path_input",
+            placeholder=r"...\Luanda_Polygons\agt_luanda_full.gpkg"))
+    else:
+        st.write("Upload a **GeoPackage** (.gpkg), a **zipped Shapefile** (.zip), or the "
+                 "individual Shapefile parts (.shp + .shx + .dbf + .prj) selected together.")
+        ups = st.file_uploader(
+            "Polygon file(s)", accept_multiple_files=True,
+            type=["gpkg", "geojson", "json", "zip", "shp", "shx", "dbf", "prj",
+                 "cpg", "sbn", "sbx", "qpj"],
+            key="poly_upload")
+        if ups:
+            S["polygons"] = resolve_uploaded_polygons(ups)
+
     if S["polygons"] and os.path.exists(S["polygons"]) and S["raster"] and os.path.exists(S["raster"]):
         if st.button("Count polygons in this raster window"):
             try:
