@@ -1,0 +1,13 @@
+numpy
+scipy
+matplotlib
+opencv-python-headless
+shapely
+pyproj
+geopandas
+pyogrio
+rasterio
+onnxruntime
+scikit-image
+scikit-learn
+streamlit

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+pyenv/
+foenv/
+*.tif
+*.tiff
+*.jp2
+*.gpkg
+*.gdb/
+Data/
+models/*.onnx
+.streamlit/secrets.toml

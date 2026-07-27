@@ -1,0 +1,45 @@
+{
+ "method": "isotonic_pav_v1",
+ "fitted": "2026-07-27",
+ "source": "241 human adjudications, blocks formal_01 + informal_01 (uncertain excluded)",
+ "n": 241,
+ "n_building": 147,
+ "n_not_building": 94,
+ "auc": 0.717,
+ "input_field": "mean_prob",
+ "knots": [
+  {
+   "score": 0.515,
+   "precision": 0.1111
+  },
+  {
+   "score": 0.669,
+   "precision": 0.2
+  },
+  {
+   "score": 0.86,
+   "precision": 0.2222
+  },
+  {
+   "score": 0.931,
+   "precision": 0.3333
+  },
+  {
+   "score": 0.943,
+   "precision": 0.4
+  },
+  {
+   "score": 0.947,
+   "precision": 0.5333
+  },
+  {
+   "score": 0.965,
+   "precision": 0.6
+  },
+  {
+   "score": 0.97,
+   "precision": 0.7929
+  }
+ ],
+ "caveat": "Fitted on ONE AOI, n=241, and the formal block is dominated by under-construction structures. Provisional - refit as more blocks return."
+}
