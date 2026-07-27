@@ -64,6 +64,11 @@ CLASS_COLORS = {"keep": "#39d353", "review": "#ff9f0a", "drop": "#ff453a",
                 "duplicate": "#bf5af2", "edge": "#0a84ff"}
 RASTER_EXTS = ("*.tif", "*.tiff", "*.jp2", "*.img", "*.vrt")
 
+BRAND_GREEN = "#1a7f37"
+BRAND_GREEN_DARK = "#14532d"
+BRAND_GREEN_LIGHT = "#eaf6ee"
+BRAND_GREEN_PILL = "#dcf5e3"
+
 
 def find_rasters(folder):
     files = []
@@ -77,13 +82,61 @@ def clean_path(p):
     paths in double quotes, which break os/rasterio calls)."""
     return p.strip().strip('"').strip("'").strip() if p else ""
 
-st.set_page_config(page_title="AGT Polygon Fixer", page_icon="🛰️", layout="wide")
+st.set_page_config(page_title="AGT Polygon Fixer", page_icon="🏘️", layout="wide")
 S = st.session_state
 S.setdefault("raster", "")
 S.setdefault("polygons", "")
 S.setdefault("result", None)
 S.setdefault("gpkg", None)
 S.setdefault("fo_proc", None)
+S.setdefault("run_summary", None)
+S.setdefault("run_counts", None)
+
+
+# --- appearance -------------------------------------------------------------
+# Brand palette lives in .streamlit/config.toml ([theme]); this stylesheet
+# covers what the theme system doesn't reach: the step-pill tabs, card panels
+# and the page's own green-tinted background.
+st.markdown(f"""
+<style>
+.stApp {{
+    background: linear-gradient(180deg, {BRAND_GREEN_LIGHT} 0%, #ffffff 420px);
+}}
+.agt-header {{ display: flex; align-items: center; gap: 14px; margin: 0 0 2px 0; }}
+.agt-header .agt-icon {{ line-height: 1; flex-shrink: 0; }}
+.agt-header .agt-title {{
+    font-size: 2.1rem; font-weight: 800; color: {BRAND_GREEN};
+    margin: 0; line-height: 1.15;
+}}
+.agt-subtitle {{ color: #4b5f50; font-size: 0.97rem; margin: 2px 0 20px 2px; }}
+
+/* custom pill step-navigation (a button row, not st.tabs() -- see the
+   comment where it's built for why) */
+.st-key-agt_nav button {{
+    border-radius: 999px !important;
+    border: none !important;
+    font-weight: 600;
+    padding: 6px 4px;
+}}
+.st-key-agt_nav div[data-testid="stHorizontalBlock"] {{ gap: 8px; }}
+
+/* card panels: st.container(border=True) renders as a bordered
+   stVerticalBlock directly under a stLayoutWrapper */
+div[data-testid="stLayoutWrapper"] > div[data-testid="stVerticalBlock"] {{
+    background: #ffffff;
+    border-radius: 14px !important;
+    box-shadow: 0 1px 6px rgba(20, 83, 45, 0.10);
+    border: 1px solid #e7f0ea !important;
+    padding: 6px 8px;
+}}
+
+button[kind="secondary"] {{
+    background-color: {BRAND_GREEN_LIGHT};
+    color: {BRAND_GREEN};
+    border: 1px solid {BRAND_GREEN};
+}}
+</style>
+""", unsafe_allow_html=True)
 
 
 def upload_dir():
@@ -185,245 +238,341 @@ def overlay_fig(result, max_px=1400):
     return fig
 
 
-st.title("🛰️ AGT Polygon Fixer")
-st.caption("Align, QA and clean building polygons against WorldView-3 imagery.")
+def before_after_fig(result, max_px=700):
+    """Side-by-side thumbnail: the delivered polygons as originally supplied
+    (BEFORE, red dashed) versus the planarised keep/review/edge deliverable
+    (AFTER, green solid), over the same imagery crop."""
+    img, tr = result["img"], result["transform"]
+    H, W = img.shape[:2]
+    scale = max(1, int(max(H, W) / max_px))
+    disp = img[::scale, ::scale]
+    l, b, rt, t = array_bounds(H, W, tr)
+    fig, axes = plt.subplots(1, 2, figsize=(8.6, 4.4), dpi=110)
+    panels = ((axes[0], result["original"], "#e5484d", "--", "BEFORE (Raw)"),
+             (axes[1], result["clean"], BRAND_GREEN, "-", "AFTER (Fixed)"))
+    for ax, gdf, color, style, label in panels:
+        ax.imshow(disp, extent=(l, rt, b, t))
+        if len(gdf):
+            gdf.boundary.plot(ax=ax, color=color, linewidth=1.2, linestyle=style)
+        ax.set_axis_off()
+        ax.set_title(label, fontsize=12, fontweight="bold", color="#1b1b1b")
+    fig.tight_layout()
+    return fig
 
-tabs = st.tabs(["1 · WV3 data", "2 · Polygons", "3 · Configure & run",
-                "4 · Review", "5 · Topology", "6 · Export"])
+
+st.markdown(f"""
+<div class="agt-header">
+  <span class="agt-icon">
+    <svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M22 2 39 12v20L22 42 5 32V12z" fill="{BRAND_GREEN_LIGHT}" stroke="{BRAND_GREEN}" stroke-width="2"/>
+      <rect x="14" y="20" width="7" height="14" fill="{BRAND_GREEN}"/>
+      <rect x="23" y="14" width="7" height="20" fill="{BRAND_GREEN}"/>
+      <rect x="16" y="23" width="3" height="3" fill="{BRAND_GREEN_LIGHT}"/>
+      <rect x="25" y="17" width="3" height="3" fill="{BRAND_GREEN_LIGHT}"/>
+      <rect x="25" y="23" width="3" height="3" fill="{BRAND_GREEN_LIGHT}"/>
+    </svg>
+  </span>
+  <h1 class="agt-title">AGT Polygon Fixer</h1>
+</div>
+<p class="agt-subtitle">Align, QA and clean building polygons against WorldView-3 imagery.</p>
+""", unsafe_allow_html=True)
+
+S.setdefault("active_step", 0)
+
+# Steps 1-3 get a checkmark once that step's own input/action is actually
+# satisfied; 4-6 are result/output views with no independent "done" state of
+# their own, so they never carry one (matches how a partial run should read).
+_step1_done = bool(S.get("raster")) and os.path.exists(S.get("raster") or "")
+_step2_done = bool(S.get("polygons")) and os.path.exists(S.get("polygons") or "")
+_step3_done = S.get("result") is not None
+
+_STEPS = [
+    (1, "WV3 data", _step1_done),
+    (2, "Polygons", _step2_done),
+    (3, "Configure & run", _step3_done),
+    (4, "Review", False),
+    (5, "Topology", False),
+    (6, "Export", False),
+]
+
+# Custom pill navigation rather than st.tabs(): st.tabs() tracks the selected
+# tab entirely client-side and resets to the first tab on any st.rerun() --
+# which Step 3 needs to call so its own checkmark updates the moment a run
+# finishes, instead of only on the next unrelated interaction. A session-state
+# int survives st.rerun() with no such reset.
+with st.container(key="agt_nav"):
+    nav_cols = st.columns(len(_STEPS))
+    for col, (n, text, done) in zip(nav_cols, _STEPS):
+        label = f"✓ {n} · {text}" if done else f"{n} · {text}"
+        is_active = S["active_step"] == n - 1
+        if col.button(label, key=f"nav_{n}", use_container_width=True,
+                     type="primary" if is_active else "secondary"):
+            # Rerun so this button's own highlight (decided above, before we
+            # knew it had just been clicked) is redrawn as active immediately,
+            # rather than one click later.
+            S["active_step"] = n - 1
+            st.rerun()
 
 # ---------------------------------------------------------------- Tab 1: raster
-with tabs[0]:
-    st.subheader("Step 1 — WorldView-3 imagery")
-    mode = st.radio("Where is the imagery?",
-                    ["Type a path on this machine", "Upload from your device"],
-                    key="raster_source_mode", horizontal=True)
-    S["raster"] = ""
+if S["active_step"] == 0:
+    with st.container(border=True):
+        st.subheader("Step 1 — WorldView-3 imagery")
+        mode = st.radio("Where is the imagery?",
+                        ["Type a path on this machine", "Upload from your device"],
+                        key="raster_source_mode", horizontal=True)
+        S["raster"] = ""
 
-    if mode == "Type a path on this machine":
-        st.write("Point to the WV3 raster **file** (GeoTIFF / JP2), or a folder to pick "
-                 "from. Rasters are large, so the app reads from disk rather than uploading.")
-        st.text_input("Raster path (file or folder)", key="raster_path_input",
-                      placeholder=r"...\Clipped_Training\Luanda_Informal_1.tif")
-        typed = clean_path(S.get("raster_path_input", ""))
-        if typed and os.path.isdir(typed):
-            rasters = find_rasters(typed)
-            if rasters:
-                st.info(f"That's a folder — pick a raster file ({len(rasters)} found):")
-                choice = st.selectbox("Raster file", rasters,
-                                      format_func=os.path.basename)
-                S["raster"] = choice
-            else:
-                st.warning("No raster files (.tif/.tiff/.jp2/.img/.vrt) found in that folder.")
-        elif typed and os.path.isfile(typed):
-            S["raster"] = typed
-        elif typed:
-            st.warning("Path not found.")
-    else:
-        st.write("Upload a WV3 raster (GeoTIFF / JP2). Uploads are capped by this "
-                 "deployment's upload-size limit and held in a temporary folder for "
-                 "this session only — for very large rasters, run the app locally and "
-                 "use a path instead.")
-        up = st.file_uploader("Raster file", type=["tif", "tiff", "jp2", "img"],
-                              key="raster_upload")
-        if up is not None:
-            S["raster"] = save_upload(up, "raster")
+        if mode == "Type a path on this machine":
+            st.write("Point to the WV3 raster **file** (GeoTIFF / JP2), or a folder to pick "
+                     "from. Rasters are large, so the app reads from disk rather than uploading.")
+            st.text_input("Raster path (file or folder)", key="raster_path_input",
+                          placeholder=r"...\Clipped_Training\Luanda_Informal_1.tif")
+            typed = clean_path(S.get("raster_path_input", ""))
+            if typed and os.path.isdir(typed):
+                rasters = find_rasters(typed)
+                if rasters:
+                    st.info(f"That's a folder — pick a raster file ({len(rasters)} found):")
+                    choice = st.selectbox("Raster file", rasters,
+                                          format_func=os.path.basename)
+                    S["raster"] = choice
+                else:
+                    st.warning("No raster files (.tif/.tiff/.jp2/.img/.vrt) found in that folder.")
+            elif typed and os.path.isfile(typed):
+                S["raster"] = typed
+            elif typed:
+                st.warning("Path not found.")
+        else:
+            st.write("Upload a WV3 raster (GeoTIFF / JP2). Uploads are capped by this "
+                     "deployment's upload-size limit and held in a temporary folder for "
+                     "this session only — for very large rasters, run the app locally and "
+                     "use a path instead.")
+            up = st.file_uploader("Raster file", type=["tif", "tiff", "jp2", "img"],
+                                  key="raster_upload")
+            if up is not None:
+                S["raster"] = save_upload(up, "raster")
 
-    if S["raster"]:
-        try:
-            with rasterio.open(S["raster"]) as r:
-                mp = r.width * r.height / 1e6
-                gb = ap.est_peak_gb(r.height, r.width)
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Width", f"{r.width:,}")
-                c2.metric("Height", f"{r.height:,}")
-                c3.metric("Megapixels", f"{mp:,.0f}")
-                c4.metric("Pixel size", f"{abs(r.transform.a):.3f} m")
-            S["raster_mp"] = mp
-            st.image(thumb(S["raster"]), caption=os.path.basename(S["raster"]),
-                     use_container_width=True)
-            if mp > ap.DEFAULT_MAX_MP:
-                st.warning(f"This raster is large ({mp:,.0f} MP, ~{gb:.1f} GB peak "
-                           f"RAM). The pipeline holds the whole raster in memory — "
-                           "clip to an area of interest, or use the override in "
-                           "Step 3 only if this machine has enough RAM.")
-            else:
-                st.success("Raster loaded. Continue to Step 2.")
-        except Exception as e:
-            st.error(f"Could not read this as a raster file: {e}\n\n"
-                     "Make sure the path is a single .tif/.jp2 file, not a folder.")
-
-# -------------------------------------------------------------- Tab 2: polygons
-with tabs[1]:
-    st.subheader("Step 2 — Polygons to fix")
-    mode2 = st.radio("Where are the polygons?",
-                     ["Type a path on this machine", "Upload from your device"],
-                     key="poly_source_mode", horizontal=True)
-    S["polygons"] = ""
-
-    if mode2 == "Type a path on this machine":
-        st.write("Point to the polygon layer (GeoPackage / Shapefile). Only features "
-                 "inside the raster footprint are loaded.")
-        S["polygons"] = clean_path(st.text_input(
-            "Polygon path", key="poly_path_input",
-            placeholder=r"...\Luanda_Polygons\agt_luanda_full.gpkg"))
-    else:
-        st.write("Upload a **GeoPackage** (.gpkg), a **zipped Shapefile** (.zip), or the "
-                 "individual Shapefile parts (.shp + .shx + .dbf + .prj) selected together.")
-        ups = st.file_uploader(
-            "Polygon file(s)", accept_multiple_files=True,
-            type=["gpkg", "geojson", "json", "zip", "shp", "shx", "dbf", "prj",
-                 "cpg", "sbn", "sbx", "qpj"],
-            key="poly_upload")
-        if ups:
-            S["polygons"] = resolve_uploaded_polygons(ups)
-
-    if S["polygons"] and os.path.exists(S["polygons"]) and S["raster"] and os.path.exists(S["raster"]):
-        if st.button("Count polygons in this raster window"):
+        if S["raster"]:
             try:
                 with rasterio.open(S["raster"]) as r:
-                    gdf = ap.load_polygons(S["polygons"], r.bounds, r.crs)
-                S["poly_preview_n"] = len(gdf)
+                    mp = r.width * r.height / 1e6
+                    gb = ap.est_peak_gb(r.height, r.width)
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Width", f"{r.width:,}")
+                    c2.metric("Height", f"{r.height:,}")
+                    c3.metric("Megapixels", f"{mp:,.0f}")
+                    c4.metric("Pixel size", f"{abs(r.transform.a):.3f} m")
+                S["raster_mp"] = mp
+                st.image(thumb(S["raster"]), caption=os.path.basename(S["raster"]),
+                         use_container_width=True)
+                if mp > ap.DEFAULT_MAX_MP:
+                    st.warning(f"This raster is large ({mp:,.0f} MP, ~{gb:.1f} GB peak "
+                               f"RAM). The pipeline holds the whole raster in memory — "
+                               "clip to an area of interest, or use the override in "
+                               "Step 3 only if this machine has enough RAM.")
+                else:
+                    st.success("Raster loaded. Continue to Step 2.")
             except Exception as e:
-                st.error(f"Could not read polygons: {e}")
-        if S.get("poly_preview_n") is not None:
-            st.success(f"{S['poly_preview_n']:,} polygons fall within the raster. Continue to Step 3.")
-    elif S["polygons"]:
-        st.warning("Set a valid raster (Step 1) and polygon path.")
+                st.error(f"Could not read this as a raster file: {e}\n\n"
+                         "Make sure the path is a single .tif/.jp2 file, not a folder.")
+
+# -------------------------------------------------------------- Tab 2: polygons
+if S["active_step"] == 1:
+    with st.container(border=True):
+        st.subheader("Step 2 — Polygons to fix")
+        mode2 = st.radio("Where are the polygons?",
+                         ["Type a path on this machine", "Upload from your device"],
+                         key="poly_source_mode", horizontal=True)
+        S["polygons"] = ""
+
+        if mode2 == "Type a path on this machine":
+            st.write("Point to the polygon layer (GeoPackage / Shapefile). Only features "
+                     "inside the raster footprint are loaded.")
+            S["polygons"] = clean_path(st.text_input(
+                "Polygon path", key="poly_path_input",
+                placeholder=r"...\Luanda_Polygons\agt_luanda_full.gpkg"))
+        else:
+            st.write("Upload a **GeoPackage** (.gpkg), a **zipped Shapefile** (.zip), or the "
+                     "individual Shapefile parts (.shp + .shx + .dbf + .prj) selected together.")
+            ups = st.file_uploader(
+                "Polygon file(s)", accept_multiple_files=True,
+                type=["gpkg", "geojson", "json", "zip", "shp", "shx", "dbf", "prj",
+                     "cpg", "sbn", "sbx", "qpj"],
+                key="poly_upload")
+            if ups:
+                S["polygons"] = resolve_uploaded_polygons(ups)
+
+        if S["polygons"] and os.path.exists(S["polygons"]) and S["raster"] and os.path.exists(S["raster"]):
+            if st.button("Count polygons in this raster window"):
+                try:
+                    with rasterio.open(S["raster"]) as r:
+                        gdf = ap.load_polygons(S["polygons"], r.bounds, r.crs)
+                    S["poly_preview_n"] = len(gdf)
+                except Exception as e:
+                    st.error(f"Could not read polygons: {e}")
+            if S.get("poly_preview_n") is not None:
+                st.success(f"{S['poly_preview_n']:,} polygons fall within the raster. Continue to Step 3.")
+        elif S["polygons"]:
+            st.warning("Set a valid raster (Step 1) and polygon path.")
 
 # ------------------------------------------------------- Tab 3: configure & run
-with tabs[2]:
-    st.subheader("Step 3 — Choose corrections and run")
-    st.write("**Corrections to apply** — tick the stages to run.")
-    c1, c2 = st.columns(2)
-    dedup = c1.checkbox("Remove duplicates", value=True,
-                        help="Drop polygons swallowed by a larger one or near-identical twins.")
-    align = c1.checkbox("Correct geometric shift (alignment)", value=True,
-                        help="Iterative grid alignment against the imagery.")
-    refine = c2.checkbox("Per-polygon refinement", value=True,
-                         help="Nudge individual polygons onto their roof (needs alignment on).")
-    planarize = c2.checkbox("Fix overlaps (planarize)", value=True,
-                            help="Resolve shared/double-counted area in the retained set.")
-    st.divider()
-    st.write("**Classification thresholds** — how keep / review / drop is decided.")
-    d = ap.default_options()
-    c1, c2, c3 = st.columns(3)
-    keep_mean = c1.slider("Keep if mean prob ≥", 0.0, 1.0, float(d["keep_mean"]), 0.05)
-    drop_mean = c2.slider("Drop if mean prob <", 0.0, 1.0, float(d["drop_mean"]), 0.05)
-    edge_frac = c3.slider("Edge if < frac inside", 0.0, 1.0, float(d["edge_frac"]), 0.05)
-    keep_cover = c1.slider("Keep if coverage ≥", 0.0, 1.0, float(d["keep_cover"]), 0.05)
-    drop_cover = c2.slider("Drop if coverage <", 0.0, 1.0, float(d["drop_cover"]), 0.05)
+if S["active_step"] == 2:
+    with st.container(border=True):
+        st.subheader("Step 3 — Choose corrections and run")
+        st.write("**Corrections to apply** — tick the stages to run.")
+        c1, c2 = st.columns(2)
+        dedup = c1.checkbox("Remove duplicates", value=True,
+                            help="Drop polygons swallowed by a larger one or near-identical twins.")
+        align = c1.checkbox("Correct geometric shift (alignment)", value=True,
+                            help="Iterative grid alignment against the imagery.")
+        refine = c2.checkbox("Per-polygon refinement", value=True,
+                             help="Nudge individual polygons onto their roof (needs alignment on).")
+        planarize = c2.checkbox("Fix overlaps (planarize)", value=True,
+                                help="Resolve shared/double-counted area in the retained set.")
+        st.divider()
+        st.write("**Classification thresholds** — how keep / review / drop is decided.")
+        d = ap.default_options()
+        c1, c2, c3 = st.columns(3)
+        keep_mean = c1.slider("Keep if mean prob ≥", 0.0, 1.0, float(d["keep_mean"]), 0.05)
+        drop_mean = c2.slider("Drop if mean prob <", 0.0, 1.0, float(d["drop_mean"]), 0.05)
+        edge_frac = c3.slider("Edge if < frac inside", 0.0, 1.0, float(d["edge_frac"]), 0.05)
+        keep_cover = c1.slider("Keep if coverage ≥", 0.0, 1.0, float(d["keep_cover"]), 0.05)
+        drop_cover = c2.slider("Drop if coverage <", 0.0, 1.0, float(d["drop_cover"]), 0.05)
 
-    ready = all(os.path.exists(p) for p in (S["raster"] or "x", S["polygons"] or "x")) \
-        and S["raster"] and S["polygons"]
-    if not ready:
-        st.info("Complete Steps 1 and 2 first.")
-    allow_large = False
-    if ready and S.get("raster_mp", 0) > ap.DEFAULT_MAX_MP:
-        allow_large = st.checkbox(
-            f"⚠ Process anyway — raster is {S['raster_mp']:,.0f} MP "
-            f"(limit {ap.DEFAULT_MAX_MP} MP). Only tick this if this machine "
-            "has plenty of RAM.")
-    if st.button("▶ Run pipeline", type="primary", disabled=not ready):
-        opts = dict(dedup=dedup, align=align, refine=refine, planarize=planarize,
-                    keep_mean=keep_mean, keep_cover=keep_cover,
-                    drop_mean=drop_mean, drop_cover=drop_cover, edge_frac=edge_frac)
-        bar = st.progress(0.0, text="Starting…")
+        ready = all(os.path.exists(p) for p in (S["raster"] or "x", S["polygons"] or "x")) \
+            and S["raster"] and S["polygons"]
+        if not ready:
+            st.info("Complete Steps 1 and 2 first.")
+        allow_large = False
+        if ready and S.get("raster_mp", 0) > ap.DEFAULT_MAX_MP:
+            allow_large = st.checkbox(
+                f"⚠ Process anyway — raster is {S['raster_mp']:,.0f} MP "
+                f"(limit {ap.DEFAULT_MAX_MP} MP). Only tick this if this machine "
+                "has plenty of RAM.")
+        if st.button("▶ Run pipeline", type="primary", disabled=not ready):
+            opts = dict(dedup=dedup, align=align, refine=refine, planarize=planarize,
+                        keep_mean=keep_mean, keep_cover=keep_cover,
+                        drop_mean=drop_mean, drop_cover=drop_cover, edge_frac=edge_frac)
+            bar = st.progress(0.0, text="Starting…")
 
-        def cb(msg, frac=None):
-            bar.progress(min(frac or 0.0, 1.0), text=msg)
-        try:
-            with st.spinner("Running…"):
-                S["result"] = ap.run_pipeline(S["raster"], S["polygons"],
-                                              options=opts, out_dir=DEFAULT_OUT,
-                                              progress=cb, allow_large=allow_large)
-                S["gpkg"] = None
-            bar.progress(1.0, text="Done")
-            s = S["result"]["stats"]
-            st.success(f"Processed {s['n_in']:,} polygons in {s['seconds']}s "
-                       f"({s['n_iters']} alignment iters, {s['n_refined']} refined).")
-            st.write("**Class counts:**", s["counts"])
-        except Exception as e:
-            st.error(f"Pipeline failed: {e}")
-            st.exception(e)
+            def cb(msg, frac=None):
+                bar.progress(min(frac or 0.0, 1.0), text=msg)
+            try:
+                with st.spinner("Running…"):
+                    S["result"] = ap.run_pipeline(S["raster"], S["polygons"],
+                                                  options=opts, out_dir=DEFAULT_OUT,
+                                                  progress=cb, allow_large=allow_large)
+                    S["gpkg"] = None
+                bar.progress(1.0, text="Done")
+                s = S["result"]["stats"]
+                S["run_summary"] = (f"Processed {s['n_in']:,} polygons in {s['seconds']}s "
+                                    f"({s['n_iters']} alignment iters, {s['n_refined']} refined).")
+                S["run_counts"] = s["counts"]
+                # The step pills are labelled from S["result"] at the top of this
+                # script run, before this button handler updates it, and switching
+                # tabs alone doesn't trigger a fresh run in this Streamlit version --
+                # without an explicit rerun, Step 3's checkmark would only appear one
+                # interaction later than the run that actually earned it.
+                st.rerun()
+            except Exception as e:
+                st.error(f"Pipeline failed: {e}")
+                st.exception(e)
+
+        if S.get("run_summary"):
+            st.success(S["run_summary"])
+            st.write("**Class counts:**", S.get("run_counts", {}))
 
 # ------------------------------------------------------------- Tab 4: review
-with tabs[3]:
-    st.subheader("Step 4 — Review results")
-    if S["result"] is None:
-        st.info("Run the pipeline (Step 3) first.")
-    else:
-        res = S["result"]
-        s = res["stats"]
-        cols = st.columns(len(CLASS_COLORS))
-        for col, (cls, _) in zip(cols, CLASS_COLORS.items()):
-            col.metric(cls, s["counts"].get(cls, 0))
-        st.pyplot(overlay_fig(res), use_container_width=True)
-        with st.expander("Attribute table (aligned + scored)"):
-            show = [c for c in ["qa_class", "mean_prob", "cover", "shift_m",
-                                "grid_m", "refine_m", "frac_in"] if c in res["qa"].columns]
-            pick = st.multiselect("Filter classes", list(CLASS_COLORS),
-                                  default=["drop", "review"])
-            df = res["qa"][res["qa"].qa_class.isin(pick)] if pick else res["qa"]
-            st.dataframe(df[show].reset_index(drop=True), height=300)
+if S["active_step"] == 3:
+    with st.container(border=True):
+        st.subheader("Step 4 — Review results")
+        if S["result"] is None:
+            st.info("Run the pipeline (Step 3) first.")
+        else:
+            res = S["result"]
+            s = res["stats"]
+            cols = st.columns(len(CLASS_COLORS))
+            for col, (cls, _) in zip(cols, CLASS_COLORS.items()):
+                col.metric(cls, s["counts"].get(cls, 0))
+            st.pyplot(overlay_fig(res), use_container_width=True)
+            with st.expander("Attribute table (aligned + scored)"):
+                show = [c for c in ["qa_class", "mean_prob", "cover", "shift_m",
+                                    "grid_m", "refine_m", "frac_in"] if c in res["qa"].columns]
+                pick = st.multiselect("Filter classes", list(CLASS_COLORS),
+                                      default=["drop", "review"])
+                df = res["qa"][res["qa"].qa_class.isin(pick)] if pick else res["qa"]
+                st.dataframe(df[show].reset_index(drop=True), height=300)
 
-        st.divider()
-        st.write("**Visual triage in FiftyOne** — inspect and confirm keep/drop on the chips.")
-        cc1, cc2 = st.columns([1, 3])
-        if cc1.button("Launch FiftyOne review"):
-            launcher = os.path.join(os.path.dirname(__file__), "launch_fiftyone.py")
-            if not os.path.exists(FIFTYONE_PY):
-                st.error(f"FiftyOne venv not found at {FIFTYONE_PY}")
-            else:
-                with st.spinner("Preparing image chips for review…"):
-                    if not S["gpkg"]:
-                        S["gpkg"] = ap.save_outputs(res, DEFAULT_OUT)
-                    manifest = ap.prepare_fiftyone_package(
-                        S["gpkg"], S["raster"], DEFAULT_OUT)
-                S["fo_proc"] = subprocess.Popen(
-                    [FIFTYONE_PY, launcher, "--manifest", manifest,
-                     "--port", str(FIFTYONE_PORT)])
-                st.success("FiftyOne is starting (first launch can take ~30 s)…")
-        cc2.markdown(f"[Open FiftyOne in a new tab](http://localhost:{FIFTYONE_PORT})")
-        if S["fo_proc"] is not None:
-            st.components.v1.iframe(f"http://localhost:{FIFTYONE_PORT}", height=760)
+            st.divider()
+            st.write("**Visual triage in FiftyOne** — inspect and confirm keep/drop on the chips.")
+            cc1, cc2 = st.columns([1, 3])
+            if cc1.button("Launch FiftyOne review"):
+                launcher = os.path.join(os.path.dirname(__file__), "launch_fiftyone.py")
+                if not os.path.exists(FIFTYONE_PY):
+                    st.error(f"FiftyOne venv not found at {FIFTYONE_PY}")
+                else:
+                    with st.spinner("Preparing image chips for review…"):
+                        if not S["gpkg"]:
+                            S["gpkg"] = ap.save_outputs(res, DEFAULT_OUT)
+                        manifest = ap.prepare_fiftyone_package(
+                            S["gpkg"], S["raster"], DEFAULT_OUT)
+                    S["fo_proc"] = subprocess.Popen(
+                        [FIFTYONE_PY, launcher, "--manifest", manifest,
+                         "--port", str(FIFTYONE_PORT)])
+                    st.success("FiftyOne is starting (first launch can take ~30 s)…")
+            cc2.markdown(f"[Open FiftyOne in a new tab](http://localhost:{FIFTYONE_PORT})")
+            if S["fo_proc"] is not None:
+                st.components.v1.iframe(f"http://localhost:{FIFTYONE_PORT}", height=760)
 
 # ------------------------------------------------------------ Tab 5: topology
-with tabs[4]:
-    st.subheader("Step 5 — Topology (overlaps)")
-    if S["result"] is None:
-        st.info("Run the pipeline (Step 3) first.")
-    else:
-        s = S["result"]["stats"]
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Retained (clean)", s["n_clean"])
-        c2.metric("Polygons clipped", s["planar_clipped"])
-        c3.metric("Overlap removed", f"{s['overlap_removed_m2']:,.0f} m²")
-        c4.metric("Residual overlap", f"{s['residual_overlap_m2']:.1f} m²")
-        if s["residual_overlap_m2"] <= 1.0:
-            st.success("Retained layer is planar — no shared/double-counted area.")
+if S["active_step"] == 4:
+    with st.container(border=True):
+        st.subheader("Step 5 — Topology (overlaps)")
+        if S["result"] is None:
+            st.info("Run the pipeline (Step 3) first.")
         else:
-            st.warning("Residual overlap remains; check planarize settings.")
-        st.caption(f"{s['planar_emptied']} polygon(s) fully consumed by a higher-evidence "
-                   "neighbour (removed as double-counts).")
+            s = S["result"]["stats"]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Retained (clean)", s["n_clean"])
+            c2.metric("Polygons clipped", s["planar_clipped"])
+            c3.metric("Overlap removed", f"{s['overlap_removed_m2']:,.0f} m²")
+            c4.metric("Residual overlap", f"{s['residual_overlap_m2']:.1f} m²")
+            if s["residual_overlap_m2"] <= 1.0:
+                st.success("Retained layer is planar — no shared/double-counted area.")
+            else:
+                st.warning("Residual overlap remains; check planarize settings.")
+            st.caption(f"{s['planar_emptied']} polygon(s) fully consumed by a higher-evidence "
+                       "neighbour (removed as double-counts).")
 
 # -------------------------------------------------------------- Tab 6: export
-with tabs[5]:
-    st.subheader("Step 6 — Export")
+if S["active_step"] == 5:
     if S["result"] is None:
-        st.info("Run the pipeline (Step 3) first.")
+        with st.container(border=True):
+            st.subheader("Step 6 — Export")
+            st.info("Run the pipeline (Step 3) first.")
     else:
-        st.write("Writes three layers: **agt_qa** (all polygons + QA attributes), "
-                 "**agt_clean** (planar keep+review+edge deliverable), "
-                 "**agt_original** (pre-shift geometry).")
-        out_dir = clean_path(st.text_input("Output folder", value=DEFAULT_OUT))
-        if st.button("💾 Write GeoPackage", type="primary"):
-            try:
-                os.makedirs(out_dir, exist_ok=True)
-                S["gpkg"] = ap.save_outputs(S["result"], out_dir)
-                st.success(f"Saved: {S['gpkg']}")
-            except Exception as e:
-                st.error(f"Save failed: {e}")
-        if S["gpkg"] and os.path.exists(S["gpkg"]):
-            with open(S["gpkg"], "rb") as fh:
-                st.download_button("Download GeoPackage", fh,
-                                   file_name=os.path.basename(S["gpkg"]))
+        col_info, col_preview, col_actions = st.columns([1.1, 1.4, 1.1])
+        with col_info:
+            with st.container(border=True):
+                st.subheader("Step 6 — Export")
+                st.markdown(
+                    "Writes three layers: **agt_qa** (all polygons + QA).\n\n"
+                    "- 🗂️ **agt_qa** (all attributes).\n"
+                    "- 🗂️ **agt_clean** (planar keep+review+edge deliverable),\n"
+                    "- 🗂️ **agt_original** (pre-shift geometry).")
+        with col_preview:
+            with st.container(border=True):
+                st.pyplot(before_after_fig(S["result"]), use_container_width=True)
+        with col_actions:
+            with st.container(border=True):
+                out_dir = clean_path(st.text_input("Output folder", value=DEFAULT_OUT))
+                if st.button("💾 Write GeoPackage", type="primary"):
+                    try:
+                        os.makedirs(out_dir, exist_ok=True)
+                        S["gpkg"] = ap.save_outputs(S["result"], out_dir)
+                        st.success(f"Saved: {S['gpkg']}")
+                    except Exception as e:
+                        st.error(f"Save failed: {e}")
+                if S["gpkg"] and os.path.exists(S["gpkg"]):
+                    with open(S["gpkg"], "rb") as fh:
+                        st.download_button("⬇ Download GeoPackage", fh,
+                                           file_name=os.path.basename(S["gpkg"]))
