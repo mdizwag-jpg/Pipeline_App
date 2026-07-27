@@ -144,7 +144,7 @@ def run_pipeline(raster_path, agt_path, options=None, out_dir=None,
     else:
         progress("Running building detection (buildseg SegFormer)", 0.10)
         import onnxruntime as ort
-        sess = ort.InferenceSession(bpt.ONNX, providers=["CPUExecutionProvider"])
+        sess = ort.InferenceSession(bpt.find_model(), providers=["CPUExecutionProvider"])
         prob = bpt.bseg_prob(img, sess, sess.get_inputs()[0].name)
         with rasterio.open(prob_path, "w", driver="GTiff", width=W, height=H,
                            count=1, dtype="float32", transform=transform, crs=crs,

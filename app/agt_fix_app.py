@@ -25,6 +25,18 @@ from rasterio.transform import array_bounds
 
 import app_pipeline as ap
 
+# Mirror Streamlit Cloud secrets (App settings -> Secrets) into real environment
+# variables, so the framework-agnostic buildseg_pipeline_tile.find_model() can
+# read them uniformly whether it's running here, from the CLI, or locally.
+for _key in ("AGT_ONNX", "AGT_ONNX_URL", "AGT_ONNX_CACHE"):
+    if not os.environ.get(_key):
+        try:
+            _val = st.secrets.get(_key)
+        except Exception:
+            _val = None
+        if _val:
+            os.environ[_key] = _val
+
 FIFTYONE_PY = os.environ.get("AGTFIX_FIFTYONE_PY",
                              r"C:\Users\phila\venvs\fiftyone311\Scripts\python.exe")
 FIFTYONE_PORT = 5151

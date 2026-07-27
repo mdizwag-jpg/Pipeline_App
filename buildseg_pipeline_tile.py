@@ -23,6 +23,78 @@ import regularize_lib as rl
 BASE = r"G:\My Drive\Innocom Global Geospatial Projects\Projects\Angola\Projects\Tax Recovery"
 ONNX = os.path.join(BASE, "Data", "Models", "buildseg_segformer_b2.onnx")
 
+_MODEL_MIN_BYTES = 10_000_000    # a real checkpoint is ~100 MB; guards against a
+                                  # Git-LFS pointer stub or a truncated download
+                                  # being silently mistaken for the real model
+
+
+def _looks_like_model(path):
+    try:
+        return os.path.getsize(path) > _MODEL_MIN_BYTES
+    except OSError:
+        return False
+
+
+def find_model():
+    """Locate the building-detection ONNX model, in order:
+
+      1. AGT_ONNX        - an explicit local path
+      2. a previously cached download (see AGT_ONNX_URL)
+      3. AGT_ONNX_URL     - a direct-download link, fetched once and cached
+      4. models/buildseg_segformer_b2.onnx bundled next to this file
+      5. the original dev machine's path (BASE above) -- kept so that machine
+         keeps working unchanged; meaningless anywhere else
+
+    Every candidate is size-checked (_looks_like_model) so a Git-LFS pointer
+    file or a partial download is never silently treated as the real model.
+    Deployments that cannot bundle the ~110 MB file directly (e.g. GitHub's
+    100 MB limit) should host it somewhere with a direct-download link
+    (a Hugging Face Hub file, a GitHub Release asset, ...) and set AGT_ONNX_URL
+    -- as a real environment variable, or as a Streamlit Cloud secret, which
+    agt_fix_app.py mirrors into the environment at startup.
+    """
+    explicit = os.environ.get("AGT_ONNX")
+    if explicit and _looks_like_model(explicit):
+        return explicit
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    cache_dir = os.environ.get("AGT_ONNX_CACHE") or os.path.join(here, "models")
+    cached = os.path.join(cache_dir, "buildseg_segformer_b2.onnx")
+    if _looks_like_model(cached):
+        return cached
+
+    url = os.environ.get("AGT_ONNX_URL")
+    if url:
+        os.makedirs(cache_dir, exist_ok=True)
+        import urllib.request
+        tmp = cached + ".part"
+        urllib.request.urlretrieve(url, tmp)
+        os.replace(tmp, cached)
+        if _looks_like_model(cached):
+            return cached
+        raise RuntimeError(
+            f"downloaded AGT_ONNX_URL ({url}) but the result doesn't look like a "
+            "valid model file (too small) -- check it's a direct file download "
+            "link, not a webpage or a Git-LFS pointer.")
+
+    bundled = os.path.join(here, "models", "buildseg_segformer_b2.onnx")
+    if _looks_like_model(bundled):
+        return bundled
+
+    if _looks_like_model(ONNX):
+        return ONNX
+
+    raise RuntimeError(
+        "Building-detection model not found or not usable in this environment. "
+        "This deployment needs one of:\n"
+        "  - AGT_ONNX pointing at a local .onnx file\n"
+        "  - AGT_ONNX_URL pointing at a direct-download link (e.g. a Hugging "
+        "Face Hub file or a GitHub Release asset) -- downloaded once and cached\n"
+        "  - buildseg_segformer_b2.onnx placed in a 'models' folder next to "
+        "buildseg_pipeline_tile.py\n"
+        "On Streamlit Community Cloud, set these under App settings -> Secrets."
+    )
+
 TILE, OVERLAP = 512, 128
 STRIDE = TILE - OVERLAP
 MIN_PX = 20
@@ -131,7 +203,7 @@ def main(tile_name):
         H, W = r.height, r.width
     print(f"{tile_name}: {W}x{H}", flush=True)
 
-    sess = ort.InferenceSession(ONNX, providers=["CPUExecutionProvider"])
+    sess = ort.InferenceSession(find_model(), providers=["CPUExecutionProvider"])
     iname = sess.get_inputs()[0].name
     prob = bseg_prob(img_hwc, sess, iname)
 
